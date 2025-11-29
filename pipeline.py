@@ -9,6 +9,7 @@ It includes data loading, preprocessing, distributed training, and evaluation.
 import ray
 from ray.train import ScalingConfig, RunConfig
 from ray.train.torch import TorchTrainer
+from ray.train.torch import prepare_model
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -54,7 +55,6 @@ def train_loop_per_worker(config):
     This function is called by Ray Train for distributed training.
     """
     from ray.train import get_dataset_shard, report
-    from ray.train.torch import prepare_model, prepare_data_loader
     
     # Get hyperparameters from config
     lr = config.get("lr", 0.001)
@@ -68,22 +68,16 @@ def train_loop_per_worker(config):
     train_shard = get_dataset_shard("train")
     val_shard = get_dataset_shard("val")
     
-    # Convert Ray Dataset to PyTorch DataLoader
-    # When label_column is specified, to_torch returns (features, labels) tuples
-    train_loader = train_shard.to_torch(
+    # Use iter_torch_batches() for Ray Train - returns iterable batches directly
+    # This is the recommended approach for Ray Train with PyTorch
+    train_loader = train_shard.iter_torch_batches(
         batch_size=batch_size,
-        label_column="labels",
-        feature_columns="features"
+        dtypes=torch.float32
     )
-    val_loader = val_shard.to_torch(
+    val_loader = val_shard.iter_torch_batches(
         batch_size=batch_size,
-        label_column="labels",
-        feature_columns="features"
+        dtypes=torch.float32
     )
-    
-    # Prepare data loaders for distributed training
-    train_loader = prepare_data_loader(train_loader)
-    val_loader = prepare_data_loader(val_loader)
     
     # Create model
     model = SimpleMLP(input_dim=input_dim, hidden_dim=hidden_dim, num_classes=num_classes)
@@ -100,15 +94,13 @@ def train_loop_per_worker(config):
         train_loss = 0.0
         train_correct = 0
         train_total = 0
+        train_batch_count = 0
         
         for batch in train_loader:
-            # Ray to_torch with label_column returns (features, labels) tuple
-            inputs, labels = batch
-            # Ensure inputs are float32 and labels are long
-            if not isinstance(inputs, torch.Tensor):
-                inputs = torch.tensor(inputs, dtype=torch.float32)
-            if not isinstance(labels, torch.Tensor):
-                labels = torch.tensor(labels, dtype=torch.long)
+            # iter_torch_batches returns a dict with column names as keys
+            # Batch already contains tensors, just ensure correct dtype
+            inputs = batch["features"].float() if isinstance(batch["features"], torch.Tensor) else torch.tensor(batch["features"], dtype=torch.float32)
+            labels = batch["labels"].long() if isinstance(batch["labels"], torch.Tensor) else torch.tensor(batch["labels"], dtype=torch.long)
             
             optimizer.zero_grad()
             outputs = model(inputs)
@@ -120,22 +112,21 @@ def train_loop_per_worker(config):
             _, predicted = torch.max(outputs.data, 1)
             train_total += labels.size(0)
             train_correct += (predicted == labels).sum().item()
+            train_batch_count += 1
         
         # Validation phase
         model.eval()
         val_loss = 0.0
         val_correct = 0
         val_total = 0
+        val_batch_count = 0
         
         with torch.no_grad():
             for batch in val_loader:
-                # Ray to_torch with label_column returns (features, labels) tuple
-                inputs, labels = batch
-                # Ensure inputs are float32 and labels are long
-                if not isinstance(inputs, torch.Tensor):
-                    inputs = torch.tensor(inputs, dtype=torch.float32)
-                if not isinstance(labels, torch.Tensor):
-                    labels = torch.tensor(labels, dtype=torch.long)
+                # iter_torch_batches returns a dict with column names as keys
+                # Batch already contains tensors, just ensure correct dtype
+                inputs = batch["features"].float() if isinstance(batch["features"], torch.Tensor) else torch.tensor(batch["features"], dtype=torch.float32)
+                labels = batch["labels"].long() if isinstance(batch["labels"], torch.Tensor) else torch.tensor(batch["labels"], dtype=torch.long)
                 
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
@@ -144,12 +135,13 @@ def train_loop_per_worker(config):
                 _, predicted = torch.max(outputs.data, 1)
                 val_total += labels.size(0)
                 val_correct += (predicted == labels).sum().item()
+                val_batch_count += 1
         
         # Calculate metrics
-        train_acc = 100 * train_correct / train_total
-        val_acc = 100 * val_correct / val_total
-        avg_train_loss = train_loss / len(train_loader)
-        avg_val_loss = val_loss / len(val_loader)
+        train_acc = 100 * train_correct / train_total if train_total > 0 else 0.0
+        val_acc = 100 * val_correct / val_total if val_total > 0 else 0.0
+        avg_train_loss = train_loss / train_batch_count if train_batch_count > 0 else 0.0
+        avg_val_loss = val_loss / val_batch_count if val_batch_count > 0 else 0.0
         
         # Report metrics to Ray Train
         metrics = {
@@ -200,10 +192,38 @@ def main():
     print("=" * 60)
     
     # Initialize Ray
-    # For local testing: ray.init()
-    # For cluster: ray.init(address="ray://<head-node>:10001")
+    # Connect to cluster via port forwarding (localhost:10001)
     print("\n1. Initializing Ray...")
-    ray.init(ignore_reinit_error=True)
+    cluster_address = os.getenv("RAY_ADDRESS", "ray://localhost:10001")
+    
+    print(f"   Connecting to Ray cluster at {cluster_address}...")
+    print("   (Port forwarding: kubectl port-forward -n default svc/novelcore-private-ray-cluster-head-svc 10001:10001)")
+    print("   (Dashboard: http://localhost:8266)")
+    
+    # Try connecting with minimal runtime_env to avoid version issues
+    try:
+        ray.init(
+            address=cluster_address, 
+            ignore_reinit_error=True,
+            runtime_env={},  # Empty runtime env to minimize compatibility issues
+            _system_config={}  # Minimal config
+        )
+        print("   ✅ Connected to remote Ray cluster!")
+        print(f"   Cluster resources: {ray.cluster_resources()}")
+        print(f"   Available resources: {ray.available_resources()}")
+    except Exception as e:
+        error_msg = str(e)
+        print(f"   ⚠️  Could not connect to cluster ({type(e).__name__})")
+        
+        # Check if it's a version mismatch
+        if "AttributeError" in error_msg or "_driver_node_id_bytes" in error_msg:
+            print("\n   ⚠️  Version mismatch detected: Client 2.52 vs Server 2.10")
+            print("   Solution: Use ./run_on_cluster.sh to run inside the cluster")
+            print("   Or run locally and monitor via dashboard at http://localhost:8266")
+        
+        print("   Falling back to local Ray instance...")
+        ray.init(ignore_reinit_error=True)
+        print("   ✅ Running in local mode")
     print(f"   Ray initialized: {ray.is_initialized()}")
     print(f"   Available resources: {ray.available_resources()}")
     
@@ -251,9 +271,10 @@ def main():
         use_gpu=False,  # Set to True if GPUs are available
     )
     
-    # Run configuration
+    # Run configuration - use absolute path
+    storage_path = os.path.abspath("./ray_results")
     run_config = RunConfig(
-        storage_path="./ray_results",
+        storage_path=storage_path,
         name="ml_pipeline_101",
     )
     
@@ -269,7 +290,7 @@ def main():
     
     # Run training
     print("\n5. Starting distributed training...")
-    print("   Monitor progress in Ray Dashboard: http://localhost:8265")
+    print("   Monitor progress in Ray Dashboard: http://localhost:8266")
     print("-" * 60)
     
     result = trainer.fit()
