@@ -1,0 +1,157 @@
+name: Ray 101 Pipeline
+
+on:
+  push:
+    branches:
+      - master
+      - main
+      - develop
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+  validate:
+    name: Validate Ray Pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate Python syntax
+        run: |
+          python -m py_compile pipeline.py train.py
+          echo "✅ Python syntax validation passed"
+
+      - name: Check imports
+        run: |
+          python -c "import ray; import torch; import numpy; import pandas; import sklearn; print('✅ All imports successful')"
+
+      - name: Check YAML files
+        run: |
+          python -c "import yaml; yaml.safe_load(open('.github/workflows/pipeline-101.yml'))" || exit 1
+          echo "✅ YAML validation passed"
+
+  test:
+    name: Test Ray Pipeline
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Test Ray initialization
+        run: |
+          python -c "
+          import ray
+          ray.init(ignore_reinit_error=True)
+          print(f'Ray initialized: {ray.is_initialized()}')
+          print(f'Available resources: {ray.available_resources()}')
+          ray.shutdown()
+          print('✅ Ray initialization test passed')
+          "
+
+      - name: Test pipeline imports
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, '.')
+          from pipeline import SimpleMLP, generate_synthetic_data, create_ray_datasets
+          import numpy as np
+          
+          # Test data generation
+          X, y = generate_synthetic_data(n_samples=100, n_features=20)
+          assert X.shape == (100, 20), f'Expected shape (100, 20), got {X.shape}'
+          assert y.shape == (100,), f'Expected shape (100,), got {y.shape}'
+          print('✅ Data generation test passed')
+          
+          # Test model creation
+          model = SimpleMLP(input_dim=20, hidden_dim=64, num_classes=2)
+          print(f'✅ Model creation test passed: {model}')
+          "
+
+      - name: Test Ray Dataset creation
+        run: |
+          python -c "
+          import ray
+          import numpy as np
+          from pipeline import create_ray_datasets
+          
+          ray.init(ignore_reinit_error=True)
+          
+          # Generate test data
+          X_train = np.random.randn(50, 20)
+          y_train = np.random.randint(0, 2, 50)
+          X_val = np.random.randn(20, 20)
+          y_val = np.random.randint(0, 2, 20)
+          
+          # Create Ray datasets
+          train_ds, val_ds = create_ray_datasets(X_train, y_train, X_val, y_val)
+          
+          # Verify datasets
+          assert train_ds.count() == 50, f'Expected 50 samples, got {train_ds.count()}'
+          assert val_ds.count() == 20, f'Expected 20 samples, got {val_ds.count()}'
+          
+          print('✅ Ray Dataset creation test passed')
+          ray.shutdown()
+          "
+
+  lint:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install linting tools
+        run: |
+          pip install --upgrade pip
+          pip install flake8 black
+
+      - name: Check code formatting with Black
+        run: |
+          black --check --diff pipeline.py train.py || echo "⚠️ Code formatting check (run 'black pipeline.py train.py' to fix)"
+
+      - name: Lint with flake8
+        run: |
+          flake8 pipeline.py train.py --max-line-length=120 --ignore=E203,W503 || echo "⚠️ Linting issues found (non-blocking)"
+
+  notify:
+    name: Notify Deployment
+    runs-on: ubuntu-latest
+    needs: [validate, test]
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    steps:
+      - name: Notify ArgoCD
+        run: |
+          echo "✅ Pipeline passed! ArgoCD will automatically sync the changes."
+          echo "Repository: ${{ github.repository }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref }}"
+
