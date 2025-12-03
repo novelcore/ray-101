@@ -57,7 +57,7 @@ ray.is_initialized()
 ray.cluster_resources()
 ray.available_resources()
 
-# Check GPUs
-ray.cluster_resources().get('GPU', 0)
+# Check GPU (cluster has 1 GPU)
+ray.cluster_resources().get('GPU', 0)  # Should return 1.0
 ```
 

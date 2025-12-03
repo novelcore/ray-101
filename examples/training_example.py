@@ -110,8 +110,8 @@ def main():
             "lr": 0.001
         },
         scaling_config=ScalingConfig(
-            num_workers=2,  # Use 2 workers
-            use_gpu=True     # Use GPUs if available
+            num_workers=1,  # Use 1 worker (cluster has 1 GPU)
+            use_gpu=True     # Use GPU if available
         ),
         datasets={"train": train_dataset}
     )

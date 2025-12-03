@@ -30,7 +30,7 @@ ray.init(address="ray://localhost:10001")
 
 print(f"Connected: {ray.is_initialized()}")
 print(f"Resources: {ray.cluster_resources()}")
-print(f"GPUs: {ray.cluster_resources().get('GPU', 0)}")
+print(f"GPU: {ray.cluster_resources().get('GPU', 0)} (1x RTX A6000, 49GB VRAM)")
 ```
 
 ## Cluster Information
@@ -39,13 +39,16 @@ print(f"GPUs: {ray.cluster_resources().get('GPU', 0)}")
 - **Cluster**: `novelcore-private-ray-cluster` (namespace: `default`)
 - **Dashboard**: Port 8265 (forward to `localhost:8265`)
 - **Client Port**: 10001 (forward to `localhost:10001`)
-- **GPUs**: 2x RTX (48GB VRAM each)
+- **Resources Available**:
+  - **GPU**: 1x NVIDIA RTX A6000 (49GB VRAM)
+  - **CPU**: 14 cores
+  - **Memory**: 64GB RAM
 
 ## Use Cases
 
 ### 1. Distributed Training (Ray Train)
 
-Train models across multiple GPUs/nodes:
+Train models using the cluster's GPU (1x RTX A6000) and CPU resources (14 cores):
 
 ```python
 import ray
@@ -71,10 +74,10 @@ def train_loop_per_worker(config):
 trainer = TorchTrainer(
     train_loop_per_worker=train_loop_per_worker,
     train_loop_config={"num_epochs": 10},
-    scaling_config=ScalingConfig(
-        num_workers=2,  # Use 2 workers
-        use_gpu=True    # Use GPUs
-    ),
+        scaling_config=ScalingConfig(
+            num_workers=1,  # Use 1 worker (cluster has 1 GPU)
+            use_gpu=True    # Use GPU
+        ),
     datasets={"train": train_dataset}
 )
 
@@ -165,7 +168,7 @@ def fine_tune_loop(config):
 
 trainer = TorchTrainer(
     fine_tune_loop,
-    scaling_config=ScalingConfig(num_workers=2, use_gpu=True),
+    scaling_config=ScalingConfig(num_workers=1, use_gpu=True),  # 1 worker for 1 GPU
     train_loop_config={"base_model": "bert-base-uncased"},
     datasets={"train": fine_tune_dataset}
 )
@@ -236,7 +239,7 @@ print(ray.cluster_resources())
 
 # GPU info
 if "GPU" in ray.cluster_resources():
-    print(f"GPUs: {ray.cluster_resources()['GPU']}")
+    print(f"GPU: {ray.cluster_resources()['GPU']} (1x RTX A6000, 49GB VRAM)")
 ```
 
 ## Common Patterns
@@ -264,7 +267,7 @@ def train_with_checkpoints(config):
 
 trainer = TorchTrainer(
     train_with_checkpoints,
-    scaling_config=ScalingConfig(num_workers=2, use_gpu=True)
+    scaling_config=ScalingConfig(num_workers=1, use_gpu=True)  # 1 worker for 1 GPU
 )
 result = trainer.fit()
 
@@ -277,12 +280,16 @@ best_checkpoint = result.best_checkpoints[0][1]
 ```python
 from ray import serve
 
-@serve.deployment
+@serve.deployment(
+    ray_actor_options={"num_gpus": 0.5}  # Share GPU between models
+)
 class ModelA:
     def predict(self, data):
         return model_a(data)
 
-@serve.deployment
+@serve.deployment(
+    ray_actor_options={"num_gpus": 0.5}  # Share GPU between models
+)
 class ModelB:
     def predict(self, data):
         return model_b(data)
@@ -304,6 +311,8 @@ serve.run(
     route_prefix="/ensemble"
 )
 ```
+
+**Note**: With 1 GPU, you can use fractional GPU allocation (`num_gpus=0.5`) to share the GPU between multiple deployments.
 
 ### Pattern 3: Distributed Data Pipeline
 
@@ -349,8 +358,10 @@ if "GPU" not in resources:
     print("No GPUs available")
     print("Available resources:", resources)
 else:
-    print(f"GPUs available: {resources['GPU']}")
+    print(f"GPU available: {resources['GPU']} (1x RTX A6000, 49GB VRAM)")
 ```
+
+**Note**: The cluster has 1 GPU. When using `num_workers=1` with `use_gpu=True`, the single worker will use the GPU. For multi-worker training without GPU, set `use_gpu=False` and `num_workers` up to 14 (one per CPU core).
 
 ### Version Mismatch
 

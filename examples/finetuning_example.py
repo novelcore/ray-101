@@ -124,8 +124,8 @@ def main():
             "pretrained_path": None  # Path to pretrained weights
         },
         scaling_config=ScalingConfig(
-            num_workers=2,  # Use 2 workers
-            use_gpu=True    # Use GPUs
+            num_workers=1,  # Use 1 worker (cluster has 1 GPU)
+            use_gpu=True    # Use GPU
         ),
         datasets={"train": fine_tune_dataset}
     )
